@@ -48,7 +48,7 @@ wordcloud = WordCloud(
 
 # Display it cleanly inside Streamlit
 image = wordcloud.to_image()
-st.image(image, use_container_width=True)
+st.image(image, use_column_width=True)
 
 
 # --- RAW TABLE ---
