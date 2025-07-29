@@ -1,5 +1,5 @@
 [theme]
-base = "light"      # or "dark"
+base = "dark"      # or "light"
 primaryColor = "#3B82F6"  # Tailwind blue‑500
 font = "sans serif"
 
