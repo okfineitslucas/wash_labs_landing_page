@@ -1,0 +1,16 @@
+# Byte‑compiled / optimized / DLL files
+__pycache__/
+*.py[cod]
+*.so
+
+# Virtual environments
+.venv/
+venv/
+
+# Streamlit secrets (never commit!)
+.streamlit/secrets.toml
+
+# macOS & editor junk
+.DS_Store
+.idea/
+.vscode/
