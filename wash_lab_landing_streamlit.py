@@ -50,7 +50,7 @@ with wc_col:
             width=800, height=400, background_color="white",
             max_words=75, stopwords=custom_stop, collocations=False, prefer_horizontal=1
         ).generate(text_blob)
-        st.image(wc.to_image(), use_container_width=True)  # <- use_container_width
+        st.image(wc.to_image(), use_column_width=True)  # <- use_column_width
     else:
         st.info("No cleaned-text column found — skipping word-cloud.")
 
