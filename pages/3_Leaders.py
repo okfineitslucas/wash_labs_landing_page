@@ -4,7 +4,7 @@ import numpy as np
 import math, re
 from collections import Counter
 from datetime import timedelta
-from config import STREAMS, HEAT
+from app_settings import STREAMS, HEAT
 
 st.set_page_config(page_title="Leaders Now • Social Pulse", layout="wide", page_icon="🏛️")
 
