@@ -1,9 +1,8 @@
+# pages/3_Leaders_Now.py
 import streamlit as st
 import pandas as pd
 import numpy as np
-import math, re
-from collections import Counter
-from datetime import timedelta
+import re
 from app_settings import STREAMS, HEAT
 
 st.set_page_config(page_title="Leaders Now • Social Pulse", layout="wide", page_icon="🏛️")
@@ -11,48 +10,84 @@ st.set_page_config(page_title="Leaders Now • Social Pulse", layout="wide", pag
 @st.cache_data(ttl=1800)
 def load_stream(url: str) -> pd.DataFrame:
     df = pd.read_csv(url, on_bad_lines="skip")
+
+    # --- Dates: parse as UTC-aware so all math/comparisons are consistent ---
     if "Date" in df.columns:
-        df["Date"] = pd.to_datetime(df["Date"], errors="coerce")
-    for c in ["Likes","Retweets","Replies","Quotes","Views"]:
-        if c not in df.columns: df[c] = 0
-    # optional fields (will be NaN on your test data)
-    for c in ["Party","Role","State","Official"]:
-        if c not in df.columns: df[c] = pd.NA
+        df["Date"] = pd.to_datetime(df["Date"], errors="coerce", utc=True)
+
+    # --- Ensure numeric interaction cols exist ---
+    for c in ["Likes", "Retweets", "Replies", "Quotes", "Views"]:
+        if c not in df.columns:
+            df[c] = 0
+
+    # --- Optional metadata (will be NaN on test data) ---
+    for c in ["Party", "Role", "State", "Official"]:
+        if c not in df.columns:
+            df[c] = pd.NA
+
     return df
 
 def compute_metrics(df: pd.DataFrame) -> pd.DataFrame:
     df = df.copy()
-    df["Interactions"] = df[["Likes","Retweets","Replies","Quotes"]].sum(axis=1)
+
+    # Interactions & ER
+    df["Interactions"] = df[["Likes", "Retweets", "Replies", "Quotes"]].sum(axis=1)
     df["ER"] = df["Interactions"] / df["Views"].replace({0: np.nan})
 
-    # Heat Index with time decay (hours since now)
-    if "Date" in df.columns and not df["Date"].isna().all():
-        hours_old = (pd.Timestamp.utcnow() - df["Date"].dt.tz_localize(None)).dt.total_seconds() / 3600.0
+    # --- Heat Index with time decay (use UTC-aware now to match df["Date"]) ---
+    now_utc = pd.Timestamp.now(tz="UTC")
+    if "Date" in df.columns and df["Date"].notna().any():
+        age_hours = (now_utc - df["Date"]).dt.total_seconds() / 3600
+        # Treat missing/invalid dates as very old (Heat ~ 0)
+        age_hours = age_hours.fillna(1e6)
     else:
-        hours_old = 0.0
-    α, β, γ, δ, lam = HEAT.values()
-    base = np.log1p(df["Views"]) + α*df["Likes"] + β*df["Retweets"] + γ*df["Replies"] + δ*df["Quotes"]
-    decay = np.exp(-lam * (hours_old if isinstance(hours_old, pd.Series) else 0.0))
+        age_hours = pd.Series(1e6, index=df.index)
+
+    # Use explicit keys (don’t rely on dict order)
+    alpha = HEAT["alpha_likes"]
+    beta = HEAT["beta_retweets"]
+    gamma = HEAT["gamma_replies"]
+    delta = HEAT["delta_quotes"]
+    lam   = HEAT["lambda_decay"]
+
+    base  = np.log1p(df["Views"]) + alpha*df["Likes"] + beta*df["Retweets"] + gamma*df["Replies"] + delta*df["Quotes"]
+    decay = np.exp(-lam * age_hours)
     df["Heat"] = base * decay
+
     return df
 
 def top_ngrams(df: pd.DataFrame, text_col="Cleaned Content", n=2, topn=20):
+    # Fallback to Content if Cleaned not present
     if text_col not in df.columns:
         text_col = "Content" if "Content" in df.columns else None
-    if not text_col: 
-        return pd.DataFrame(columns=["gram","count","avg_ER","avg_Heat"])
+    if not text_col:
+        return pd.DataFrame(columns=["gram", "count", "avg_ER", "avg_Heat"])
+
     rows = []
     for _, r in df.dropna(subset=[text_col]).iterrows():
         toks = re.findall(r"(?:[#@]?\w+)", str(r[text_col]).lower())
-        toks = [t for t in toks if t not in {"rt","https","tco"}]
+        toks = [t for t in toks if t not in {"rt", "https", "tco"}]
+        if len(toks) < n:
+            continue
         grams = list(zip(*[toks[i:] for i in range(n)]))
         for g in grams:
-            rows.append({"gram":" ".join(g), "ER": r.get("ER", np.nan), "Heat": r.get("Heat", np.nan)})
-    if not rows: 
-        return pd.DataFrame(columns=["gram","count","avg_ER","avg_Heat"])
+            rows.append({
+                "gram": " ".join(g),
+                "ER":   r.get("ER", np.nan),
+                "Heat": r.get("Heat", np.nan),
+            })
+
+    if not rows:
+        return pd.DataFrame(columns=["gram", "count", "avg_ER", "avg_Heat"])
+
     gdf = pd.DataFrame(rows)
-    agg = gdf.groupby("gram").agg(count=("gram","count"), avg_ER=("ER","mean"), avg_Heat=("Heat","mean")).reset_index()
-    return agg.sort_values(["avg_Heat","count"], ascending=[False, False]).head(topn)
+    agg = gdf.groupby("gram").agg(
+        count=("gram", "count"),
+        avg_ER=("ER", "mean"),
+        avg_Heat=("Heat", "mean"),
+    ).reset_index()
+
+    return agg.sort_values(["avg_Heat", "count"], ascending=[False, False]).head(topn)
 
 # ---------- DATA ----------
 df = compute_metrics(load_stream(STREAMS["leaders"]))
@@ -63,33 +98,38 @@ st.caption("Live view of what U.S. leaders are saying right now (designed for hi
 # ---------- FILTERS ----------
 with st.sidebar:
     st.header("Filters")
-    # timeframe
+
+    # Timeframe (make start/end UTC-aware to match df["Date"])
     if "Date" in df.columns and df["Date"].notna().any():
-        maxd = df["Date"].max()
+        maxd = df["Date"].max()  # tz-aware
         default_start = (maxd - pd.Timedelta(days=1)).date()
-        start, end = st.date_input("Date range", (default_start, maxd.date()))
-        start, end = pd.to_datetime(start), pd.to_datetime(end) + pd.Timedelta(days=1) - pd.Timedelta(seconds=1)
+        start_date, end_date = st.date_input("Date range", (default_start, maxd.date()))
+
+        # Convert to UTC-aware bounds (end inclusive)
+        start = pd.to_datetime(start_date).tz_localize("UTC")
+        end   = pd.to_datetime(end_date).tz_localize("UTC") + pd.Timedelta(days=1) - pd.Timedelta(microseconds=1)
         df = df[(df["Date"] >= start) & (df["Date"] <= end)]
 
-    # official-only toggle; will do nothing on test data
+    # Official-only (will no-op on test data)
     official_only = st.checkbox("Official accounts only", value=True)
     if official_only and "Official" in df.columns and df["Official"].notna().any():
-        df = df[df["Official"].astype(str).str.lower().isin(["true","1"])]
+        df = df[df["Official"].astype(str).str.lower().isin(["true", "1"])]
 
-    # party filters (works when Party exists)
-    parties = sorted([p for p in df.get("Party", pd.Series(dtype=str)).dropna().unique().tolist()])
+    # Party filters (works when Party exists)
+    parties = sorted(df.get("Party", pd.Series(dtype=str)).dropna().unique().tolist())
     sel_party = st.multiselect("Party", parties, default=parties if parties else [])
     if sel_party:
         df = df[df["Party"].isin(sel_party)]
 
-    # min views to tame the firehose
+    # Min views to tame the firehose
     mv = st.slider("Minimum Views", 0, int(df["Views"].max() or 0), int(df["Views"].median() or 0))
 
+# Apply min-views filter
 df = df[df["Views"] >= mv] if "Views" in df.columns else df
 
 # ---------- KPIs ----------
 st.subheader("🎯 Right Now")
-k1,k2,k3,k4 = st.columns(4)
+k1, k2, k3, k4 = st.columns(4)
 k1.metric("Posts", f"{len(df):,}")
 k2.metric("Views (24h)", f"{int(df['Views'].sum()):,}")
 k3.metric("Avg ER", f"{df['ER'].mean(skipna=True):.2%}" if len(df) else "—")
@@ -102,18 +142,29 @@ c1, c2 = st.columns(2)
 with c1:
     st.subheader("🔥 Top Topics (by Heat)")
     st.dataframe(top_ngrams(df, n=2, topn=25), use_container_width=True, hide_index=True)
+
 with c2:
     st.subheader("📌 Top Hashtags (by Heat)")
-    # quick hashtag table
-    tags = df["Content"].dropna().apply(lambda t: re.findall(r"#\w+", str(t).lower())).explode()
-    ht = (pd.DataFrame({"Hashtag": tags})
-          .assign(Heat=df.loc[tags.index, "Heat"].values if len(tags.index)==len(df.loc[tags.index]) else np.nan)
-          .dropna())
-    if not ht.empty:
-        ttab = ht.groupby("Hashtag").agg(count=("Hashtag","count"), avg_Heat=("Heat","mean")).reset_index()
-        st.dataframe(ttab.sort_values(["avg_Heat","count"], ascending=[False,False]).head(25), use_container_width=True, hide_index=True)
+    if "Content" in df.columns and len(df):
+        contents = df["Content"].dropna().astype(str).str.lower()
+        tags = contents.apply(lambda t: re.findall(r"#\w+", t)).explode()
+        if tags.notna().any():
+            ht = pd.DataFrame({
+                "Hashtag": tags,
+                "Heat": df.loc[tags.index, "Heat"].values
+            })
+            ttab = ht.groupby("Hashtag").agg(
+                count=("Hashtag", "count"),
+                avg_Heat=("Heat", "mean")
+            ).reset_index()
+            st.dataframe(
+                ttab.sort_values(["avg_Heat", "count"], ascending=[False, False]).head(25),
+                use_container_width=True, hide_index=True
+            )
+        else:
+            st.info("No hashtags found in this slice.")
     else:
-        st.info("No hashtags found in this slice.")
+        st.info("No Content column available.")
 
 st.markdown("---")
 
@@ -126,7 +177,6 @@ st.dataframe(feed, use_container_width=True, hide_index=True)
 # ---------- CROSS-PARTY CONTRAST ----------
 st.markdown("---")
 st.subheader("⚖️ Cross-Party Contrast (last 24h)")
-# compute within last 24h window regardless of sidebar date
 if "Date" in df.columns and df["Date"].notna().any():
     recent = df[df["Date"] >= (df["Date"].max() - pd.Timedelta(hours=24))]
     if "Party" in recent.columns and recent["Party"].notna().any():
@@ -149,11 +199,16 @@ if "Date" in df.columns and df["Date"].notna().any():
     maxd = df["Date"].max()
     baseline = df[(df["Date"] >= maxd - pd.Timedelta(days=7)) & (df["Date"] < maxd - pd.Timedelta(days=1))]
     window   = df[df["Date"] >= maxd - pd.Timedelta(days=1)]
-    # topic deltas (bigrams)
+
     base_tbl = top_ngrams(baseline, n=2, topn=9999).set_index("gram") if len(baseline) else pd.DataFrame(columns=["gram","count","avg_Heat"]).set_index("gram")
     win_tbl  = top_ngrams(window,   n=2, topn=9999).set_index("gram") if len(window)   else pd.DataFrame(columns=["gram","count","avg_Heat"]).set_index("gram")
-    merged = win_tbl.join(base_tbl, how="left", lsuffix="_now", rsuffix="_base").fillna({"avg_Heat_base":0, "count_base":0})
+
+    merged = win_tbl.join(base_tbl, how="left", lsuffix="_now", rsuffix="_base").fillna({"avg_Heat_base": 0, "count_base": 0})
     merged["Heat_lift"] = merged["avg_Heat_now"] - merged["avg_Heat_base"]
-    st.dataframe(merged.sort_values("Heat_lift", ascending=False).head(20).reset_index().rename(columns={"index":"bigram"}), use_container_width=True, hide_index=True)
+
+    st.dataframe(
+        merged.sort_values("Heat_lift", ascending=False).head(20).reset_index().rename(columns={"index": "bigram"}),
+        use_container_width=True, hide_index=True
+    )
 else:
     st.info("Need Date to compute anomalies.")
